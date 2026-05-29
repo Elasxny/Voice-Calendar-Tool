@@ -1,0 +1,370 @@
+import 'package:flutter/material.dart';
+import 'package:hive_flutter/hive_flutter.dart';
+import 'package:intl/intl.dart';
+import 'models/calendar_event.dart';
+import 'services/speech_service.dart';
+import 'services/calendar_service.dart';
+import 'services/voice_command_parser.dart';
+import 'widgets/calendar_view.dart';
+import 'widgets/event_list.dart';
+import 'widgets/voice_command_button.dart';
+import 'widgets/event_detail_dialog.dart';
+
+void main() async {
+  await Hive.initFlutter();
+  Hive.registerAdapter(CalendarEventAdapter());
+  
+  runApp(const MyApp());
+}
+
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: '语音日历',
+      theme: ThemeData(
+        useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
+      ),
+      home: const HomePage(),
+    );
+  }
+}
+
+class HomePage extends StatefulWidget {
+  const HomePage({super.key});
+
+  @override
+  State<HomePage> createState() => _HomePageState();
+}
+
+class _HomePageState extends State<HomePage> {
+  final SpeechService _speechService = SpeechService();
+  final CalendarService _calendarService = CalendarService();
+  final VoiceCommandParser _commandParser = VoiceCommandParser();
+  
+  DateTime _focusedDay = DateTime.now();
+  DateTime? _selectedDay;
+  bool _isListening = false;
+  String _recognizedText = '';
+  String _statusMessage = '点击麦克风开始语音输入';
+  bool _isInitialized = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _initializeServices();
+  }
+
+  Future<void> _initializeServices() async {
+    await _speechService.initialize();
+    await _calendarService.initialize();
+    setState(() {
+      _isInitialized = true;
+      _selectedDay = DateTime.now();
+    });
+  }
+
+  void _toggleListening() async {
+    if (_isListening) {
+      await _speechService.stopListening();
+      setState(() {
+        _isListening = false;
+      });
+      _processCommand(_recognizedText);
+    } else {
+      setState(() {
+        _recognizedText = '';
+        _statusMessage = '正在听...';
+      });
+      await _speechService.startListening(
+        onResult: (text) {
+          setState(() {
+            _recognizedText = text;
+          });
+        },
+        onListening: () {
+          setState(() {
+            _isListening = true;
+          });
+        },
+        onStopped: () {
+          setState(() {
+            _isListening = false;
+          });
+        },
+      );
+    }
+  }
+
+  void _processCommand(String commandText) async {
+    if (commandText.isEmpty) {
+      _setStatusMessage('未识别到语音输入');
+      return;
+    }
+
+    final parsedCommand = _commandParser.parse(commandText);
+    String response = '';
+
+    switch (parsedCommand.type) {
+      case CommandType.addEvent:
+        response = await _handleAddEvent(parsedCommand);
+        break;
+      case CommandType.deleteEvent:
+        response = await _handleDeleteEvent(parsedCommand);
+        break;
+      case CommandType.viewToday:
+        response = await _handleViewToday();
+        break;
+      case CommandType.viewWeek:
+        response = await _handleViewWeek();
+        break;
+      case CommandType.viewEvents:
+        response = await _handleViewEvents();
+        break;
+      case CommandType.setReminder:
+        response = await _handleSetReminder(parsedCommand);
+        break;
+      case CommandType.unknown:
+        response = '抱歉，我没有理解您的指令';
+        break;
+    }
+
+    _setStatusMessage(response);
+    await _speechService.speak(response);
+  }
+
+  Future<String> _handleAddEvent(ParsedCommand command) async {
+    final title = command.title ?? '未命名事件';
+    final dateTime = command.dateTime ?? DateTime.now().add(const Duration(hours: 1));
+    final endDateTime = command.endDateTime ?? dateTime.add(const Duration(hours: 1));
+    
+    final event = CalendarEvent(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      title: title,
+      startDateTime: dateTime,
+      endDateTime: endDateTime,
+      location: command.location,
+    );
+    
+    await _calendarService.addEvent(event);
+    setState(() {
+      _selectedDay = dateTime;
+    });
+    
+    return '已添加日程：$title，时间：${DateFormat('MM月dd日 HH:mm').format(dateTime)}';
+  }
+
+  Future<String> _handleDeleteEvent(ParsedCommand command) async {
+    if (command.title == null) {
+      return '请告诉我要删除的日程名称';
+    }
+    
+    final events = _calendarService.getAllEvents();
+    final matchedEvent = events.firstWhere(
+      (e) => e.title.contains(command.title!),
+      orElse: () => CalendarEvent(
+        id: '',
+        title: '',
+        startDateTime: DateTime.now(),
+        endDateTime: DateTime.now(),
+      ),
+    );
+    
+    if (matchedEvent.id.isEmpty) {
+      return '未找到名为 "${command.title}" 的日程';
+    }
+    
+    await _calendarService.deleteEvent(matchedEvent.id);
+    return '已删除日程：${matchedEvent.title}';
+  }
+
+  Future<String> _handleViewToday() async {
+    setState(() {
+      _selectedDay = DateTime.now();
+    });
+    
+    final events = _calendarService.getEventsForToday();
+    if (events.isEmpty) {
+      return '今天没有日程安排';
+    }
+    
+    String response = '今天有 ${events.length} 个日程：';
+    for (var event in events) {
+      response += '${event.title}在${event.formattedTime}，';
+    }
+    return response;
+  }
+
+  Future<String> _handleViewWeek() async {
+    final events = _calendarService.getEventsForWeek(DateTime.now());
+    if (events.isEmpty) {
+      return '本周没有日程安排';
+    }
+    
+    String response = '本周有 ${events.length} 个日程：';
+    for (var event in events) {
+      response += '${event.formattedDate} ${event.title}，';
+    }
+    return response;
+  }
+
+  Future<String> _handleViewEvents() async {
+    final events = _calendarService.getAllEvents();
+    if (events.isEmpty) {
+      return '日历中没有任何日程';
+    }
+    
+    return '日历中共有 ${events.length} 个日程';
+  }
+
+  Future<String> _handleSetReminder(ParsedCommand command) async {
+    final title = command.title ?? '提醒';
+    final dateTime = command.dateTime ?? DateTime.now().add(const Duration(hours: 1));
+    final reminderMinutes = command.reminderMinutes ?? 15;
+    final reminderTime = dateTime.subtract(Duration(minutes: reminderMinutes));
+    
+    final event = CalendarEvent(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      title: title,
+      startDateTime: dateTime,
+      endDateTime: dateTime.add(const Duration(hours: 1)),
+      hasReminder: true,
+      reminderTime: reminderTime,
+    );
+    
+    await _calendarService.addEvent(event);
+    return '已设置提醒：$title，时间：${DateFormat('MM月dd日 HH:mm').format(dateTime)}';
+  }
+
+  void _setStatusMessage(String message) {
+    setState(() {
+      _statusMessage = message;
+    });
+  }
+
+  void _onDaySelected(DateTime selectedDay, DateTime focusedDay) {
+    setState(() {
+      _selectedDay = selectedDay;
+      _focusedDay = focusedDay;
+    });
+  }
+
+  void _onEventTapped(CalendarEvent event) {
+    showDialog(
+      context: context,
+      builder: (context) => EventDetailDialog(
+        event: event,
+        onClose: () => Navigator.pop(context),
+        onEdit: () => Navigator.pop(context),
+      ),
+    );
+  }
+
+  void _onDeleteEvent(CalendarEvent event) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('确认删除'),
+        content: Text('确定要删除 "${event.title}" 吗？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () async {
+              await _calendarService.deleteEvent(event.id);
+              Navigator.pop(context);
+              setState(() {});
+              _setStatusMessage('已删除日程：${event.title}');
+            },
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_isInitialized) {
+      return const Scaffold(
+        body: Center(
+          child: CircularProgressIndicator(),
+        ),
+      );
+    }
+
+    final events = _calendarService.getEventsMap();
+    final List<CalendarEvent> selectedEvents = _selectedDay != null 
+        ? _calendarService.getEventsForDate(_selectedDay!) 
+        : <CalendarEvent>[];
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('语音日历'),
+        centerTitle: true,
+      ),
+      body: Column(
+        children: [
+          CalendarView(
+            focusedDay: _focusedDay,
+            selectedDay: _selectedDay,
+            events: events,
+            onDaySelected: _onDaySelected,
+            onPageChanged: (focusedDay) => setState(() => _focusedDay = focusedDay),
+          ),
+          const Divider(height: 1),
+          Expanded(
+            child: EventList(
+              events: selectedEvents,
+              onEventTapped: _onEventTapped,
+              onDeleteEvent: _onDeleteEvent,
+            ),
+          ),
+        ],
+      ),
+      bottomNavigationBar: BottomAppBar(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            VoiceCommandButton(
+              isListening: _isListening,
+              onPressed: _toggleListening,
+              hintText: '点击开始语音输入',
+            ),
+            const SizedBox(height: 8),
+            Text(
+              _statusMessage,
+              style: Theme.of(context).textTheme.bodySmall,
+              textAlign: TextAlign.center,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+            if (_recognizedText.isNotEmpty)
+              Text(
+                '识别到：$_recognizedText',
+                style: Theme.of(context).textTheme.bodySmall!.copyWith(
+                  color: Theme.of(context).primaryColor,
+                ),
+                textAlign: TextAlign.center,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _speechService.dispose();
+    _calendarService.dispose();
+    super.dispose();
+  }
+}
