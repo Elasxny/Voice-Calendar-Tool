@@ -5,6 +5,7 @@ import 'models/calendar_event.dart';
 import 'services/speech_service.dart';
 import 'services/calendar_service.dart';
 import 'services/voice_command_parser.dart';
+import 'services/ai_intent_service.dart';
 import 'widgets/calendar_view.dart';
 import 'widgets/event_list.dart';
 import 'widgets/voice_command_button.dart';
@@ -24,6 +25,11 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: '语音日历',
+      debugShowCheckedModeBanner: false,
+      debugShowMaterialGrid: false,
+      showSemanticsDebugger: false,
+      checkerboardRasterCacheImages: false,
+      checkerboardOffscreenLayers: false,
       theme: ThemeData(
         useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
@@ -44,6 +50,7 @@ class _HomePageState extends State<HomePage> {
   final SpeechService _speechService = SpeechService();
   final CalendarService _calendarService = CalendarService();
   final VoiceCommandParser _commandParser = VoiceCommandParser();
+  final AIIntentService _aiIntentService = AIIntentService();
   
   DateTime _focusedDay = DateTime.now();
   DateTime? _selectedDay;
@@ -51,6 +58,7 @@ class _HomePageState extends State<HomePage> {
   String _recognizedText = '';
   String _statusMessage = '点击麦克风开始语音输入';
   bool _isInitialized = false;
+  bool _useAIMode = false;
 
   @override
   void initState() {
@@ -61,9 +69,11 @@ class _HomePageState extends State<HomePage> {
   Future<void> _initializeServices() async {
     await _speechService.initialize();
     await _calendarService.initialize();
+    await _aiIntentService.initialize();
     setState(() {
       _isInitialized = true;
       _selectedDay = DateTime.now();
+      _useAIMode = !_aiIntentService.useFallback;
     });
   }
 
@@ -105,35 +115,130 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
-    final parsedCommand = _commandParser.parse(commandText);
     String response = '';
 
-    switch (parsedCommand.type) {
-      case CommandType.addEvent:
-        response = await _handleAddEvent(parsedCommand);
-        break;
-      case CommandType.deleteEvent:
-        response = await _handleDeleteEvent(parsedCommand);
-        break;
-      case CommandType.viewToday:
-        response = await _handleViewToday();
-        break;
-      case CommandType.viewWeek:
-        response = await _handleViewWeek();
-        break;
-      case CommandType.viewEvents:
-        response = await _handleViewEvents();
-        break;
-      case CommandType.setReminder:
-        response = await _handleSetReminder(parsedCommand);
-        break;
-      case CommandType.unknown:
-        response = '抱歉，我没有理解您的指令';
-        break;
+    if (_useAIMode) {
+      response = await _processWithAI(commandText);
+    } else {
+      final parsedCommand = _commandParser.parse(commandText);
+      response = await _processWithRules(parsedCommand);
     }
 
     _setStatusMessage(response);
     await _speechService.speak(response);
+  }
+
+  Future<String> _processWithAI(String commandText) async {
+    try {
+      final intentResult = await _aiIntentService.recognize(commandText);
+      
+      switch (intentResult.type) {
+        case IntentType.addEvent:
+          return await _handleAIAddEvent(intentResult);
+        case IntentType.deleteEvent:
+          return await _handleAIDeleteEvent(intentResult);
+        case IntentType.viewToday:
+          return await _handleViewToday();
+        case IntentType.viewWeek:
+          return await _handleViewWeek();
+        case IntentType.viewEvents:
+          return await _handleViewEvents();
+        case IntentType.setReminder:
+          return await _handleAISetReminder(intentResult);
+        case IntentType.unknown:
+          return '抱歉，我没有理解您的指令';
+      }
+    } catch (e) {
+      return await _fallbackToRules(commandText);
+    }
+  }
+
+  Future<String> _processWithRules(ParsedCommand parsedCommand) async {
+    switch (parsedCommand.type) {
+      case CommandType.addEvent:
+        return await _handleAddEvent(parsedCommand);
+      case CommandType.deleteEvent:
+        return await _handleDeleteEvent(parsedCommand);
+      case CommandType.viewToday:
+        return await _handleViewToday();
+      case CommandType.viewWeek:
+        return await _handleViewWeek();
+      case CommandType.viewEvents:
+        return await _handleViewEvents();
+      case CommandType.setReminder:
+        return await _handleSetReminder(parsedCommand);
+      case CommandType.unknown:
+        return '抱歉，我没有理解您的指令';
+    }
+  }
+
+  Future<String> _fallbackToRules(String commandText) async {
+    final parsedCommand = _commandParser.parse(commandText);
+    return await _processWithRules(parsedCommand);
+  }
+
+  Future<String> _handleAIAddEvent(IntentResult result) async {
+    final title = result.title ?? '未命名事件';
+    final dateTime = result.dateTime ?? DateTime.now().add(const Duration(hours: 1));
+    final endDateTime = result.endDateTime ?? dateTime.add(const Duration(hours: 1));
+    
+    final event = CalendarEvent(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      title: title,
+      startDateTime: dateTime,
+      endDateTime: endDateTime,
+      location: result.location,
+    );
+    
+    await _calendarService.addEvent(event);
+    setState(() {
+      _selectedDay = dateTime;
+    });
+    
+    return 'AI识别：已添加日程：$title，时间：${DateFormat('MM月dd日 HH:mm').format(dateTime)}';
+  }
+
+  Future<String> _handleAIDeleteEvent(IntentResult result) async {
+    if (result.title == null) {
+      return '请告诉我要删除的日程名称';
+    }
+    
+    final events = _calendarService.getAllEvents();
+    final matchedEvent = events.firstWhere(
+      (e) => e.title.contains(result.title!),
+      orElse: () => CalendarEvent(
+        id: '',
+        title: '',
+        startDateTime: DateTime.now(),
+        endDateTime: DateTime.now(),
+      ),
+    );
+    
+    if (matchedEvent.id.isEmpty) {
+      return '未找到名为 "${result.title}" 的日程';
+    }
+    
+    await _calendarService.deleteEvent(matchedEvent.id);
+    return 'AI识别：已删除日程：${matchedEvent.title}';
+  }
+
+  Future<String> _handleAISetReminder(IntentResult result) async {
+    final title = result.title ?? '提醒';
+    final dateTime = result.dateTime ?? DateTime.now().add(const Duration(hours: 1));
+    final reminderMinutes = result.reminderMinutes ?? 15;
+    final reminderTime = dateTime.subtract(Duration(minutes: reminderMinutes));
+    
+    final event = CalendarEvent(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      title: title,
+      startDateTime: dateTime,
+      endDateTime: dateTime.add(const Duration(hours: 1)),
+      hasReminder: true,
+      reminderTime: reminderTime,
+    );
+    
+    await _calendarService.addEvent(event);
+    return 'AI识别：已设置提醒：$title，时间：${DateFormat('MM月dd日 HH:mm').format(dateTime)}';
   }
 
   Future<String> _handleAddEvent(ParsedCommand command) async {
@@ -365,6 +470,7 @@ class _HomePageState extends State<HomePage> {
   void dispose() {
     _speechService.dispose();
     _calendarService.dispose();
+    _aiIntentService.dispose();
     super.dispose();
   }
 }
