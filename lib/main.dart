@@ -10,6 +10,9 @@ import 'widgets/calendar_view.dart';
 import 'widgets/event_list.dart';
 import 'widgets/voice_command_button.dart';
 import 'widgets/event_detail_dialog.dart';
+import 'widgets/sidebar_widget.dart';
+import 'widgets/agent_view.dart';
+import 'widgets/schedule_view.dart';
 
 void main() async {
   await Hive.initFlutter();
@@ -59,6 +62,7 @@ class _HomePageState extends State<HomePage> {
   String _statusMessage = '点击麦克风开始语音输入';
   bool _isInitialized = false;
   bool _useAIMode = false;
+  ViewType _currentView = ViewType.agent;
 
   @override
   void initState() {
@@ -289,6 +293,7 @@ class _HomePageState extends State<HomePage> {
   Future<String> _handleViewToday() async {
     setState(() {
       _selectedDay = DateTime.now();
+      _currentView = ViewType.calendar;
     });
     
     final events = _calendarService.getEventsForToday();
@@ -317,6 +322,10 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<String> _handleViewEvents() async {
+    setState(() {
+      _currentView = ViewType.schedule;
+    });
+    
     final events = _calendarService.getAllEvents();
     if (events.isEmpty) {
       return '日历中没有任何日程';
@@ -393,6 +402,50 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  Widget _buildCurrentView() {
+    final events = _calendarService.getEventsMap();
+    final List<CalendarEvent> selectedEvents = _selectedDay != null 
+        ? _calendarService.getEventsForDate(_selectedDay!) 
+        : <CalendarEvent>[];
+    final List<CalendarEvent> allEvents = _calendarService.getAllEvents();
+
+    switch (_currentView) {
+      case ViewType.agent:
+        return AgentView(
+          isListening: _isListening,
+          onToggleListening: _toggleListening,
+          statusMessage: _statusMessage,
+          recognizedText: _recognizedText,
+        );
+      case ViewType.calendar:
+        return Column(
+          children: [
+            CalendarView(
+              focusedDay: _focusedDay,
+              selectedDay: _selectedDay,
+              events: events,
+              onDaySelected: _onDaySelected,
+              onPageChanged: (focusedDay) => setState(() => _focusedDay = focusedDay),
+            ),
+            const Divider(height: 1),
+            Expanded(
+              child: EventList(
+                events: selectedEvents,
+                onEventTapped: _onEventTapped,
+                onDeleteEvent: _onDeleteEvent,
+              ),
+            ),
+          ],
+        );
+      case ViewType.schedule:
+        return ScheduleView(
+          allEvents: allEvents,
+          onEventTapped: _onEventTapped,
+          onDeleteEvent: _onDeleteEvent,
+        );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     if (!_isInitialized) {
@@ -403,65 +456,21 @@ class _HomePageState extends State<HomePage> {
       );
     }
 
-    final events = _calendarService.getEventsMap();
-    final List<CalendarEvent> selectedEvents = _selectedDay != null 
-        ? _calendarService.getEventsForDate(_selectedDay!) 
-        : <CalendarEvent>[];
-
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('语音日历'),
-        centerTitle: true,
-      ),
-      body: Column(
+      body: Row(
         children: [
-          CalendarView(
-            focusedDay: _focusedDay,
-            selectedDay: _selectedDay,
-            events: events,
-            onDaySelected: _onDaySelected,
-            onPageChanged: (focusedDay) => setState(() => _focusedDay = focusedDay),
+          SidebarWidget(
+            currentView: _currentView,
+            onViewChanged: (viewType) {
+              setState(() {
+                _currentView = viewType;
+              });
+            },
           ),
-          const Divider(height: 1),
           Expanded(
-            child: EventList(
-              events: selectedEvents,
-              onEventTapped: _onEventTapped,
-              onDeleteEvent: _onDeleteEvent,
-            ),
+            child: _buildCurrentView(),
           ),
         ],
-      ),
-      bottomNavigationBar: BottomAppBar(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            VoiceCommandButton(
-              isListening: _isListening,
-              onPressed: _toggleListening,
-              hintText: '点击开始语音输入',
-            ),
-            const SizedBox(height: 8),
-            Text(
-              _statusMessage,
-              style: Theme.of(context).textTheme.bodySmall,
-              textAlign: TextAlign.center,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-            ),
-            if (_recognizedText.isNotEmpty)
-              Text(
-                '识别到：$_recognizedText',
-                style: Theme.of(context).textTheme.bodySmall!.copyWith(
-                  color: Theme.of(context).primaryColor,
-                ),
-                textAlign: TextAlign.center,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-          ],
-        ),
       ),
     );
   }
